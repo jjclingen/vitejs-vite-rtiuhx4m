@@ -1,0 +1,528 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>NutriLog Admin Portal</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    * { box-sizing: border-box; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    ::-webkit-scrollbar { width: 4px; height: 4px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: #475569; border-radius: 4px; }
+    @media print {
+      .no-print { display: none !important; }
+      body { background: white !important; color: black !important; }
+      .print-card { background: white !important; border: 1px solid #e2e8f0 !important; color: black !important; }
+      .print-table th { background: #f1f5f9 !important; color: #374151 !important; }
+      .print-table td { color: #374151 !important; border-color: #e2e8f0 !important; }
+      .print-header { background: #f8fafc !important; border-bottom: 2px solid #10b981 !important; }
+    }
+  </style>
+</head>
+<body class="bg-slate-900 text-white min-h-screen">
+<div id="app"></div>
+
+<script type="module">
+// ─────────────────────────────────────────────────────────────────
+// CONFIG — Firebase is pre-filled from your project. Add your email.
+// ─────────────────────────────────────────────────────────────────
+const FIREBASE_CONFIG = {
+  apiKey:            "AIzaSyDeHyTA4qVrB5JduISaO-L7bUTMuaIxpEU",
+  authDomain:        "nutriapp-e54d9.firebaseapp.com",
+  projectId:         "nutriapp-e54d9",
+  storageBucket:     "nutriapp-e54d9.firebasestorage.app",
+  messagingSenderId: "88435713774",
+  appId:             "1:88435713774:web:3e37c4ea90069ecca7f5ff"
+};
+
+// Add every Google email that should have CS access
+const ADMIN_EMAILS = [
+  "jonathanclingenpeel21403@gmail.com"
+];
+
+// ─────────────────────────────────────────────────────────────────
+// FIREBASE INIT
+// ─────────────────────────────────────────────────────────────────
+import { initializeApp }
+  from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js';
+import { getAuth, signInWithPopup, signOut, onAuthStateChanged, GoogleAuthProvider }
+  from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js';
+import { getFirestore, collection, doc, getDoc, getDocs }
+  from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js';
+
+const fbApp   = initializeApp(FIREBASE_CONFIG);
+const auth    = getAuth(fbApp);
+const db      = getFirestore(fbApp);
+const provider = new GoogleAuthProvider();
+
+// ─────────────────────────────────────────────────────────────────
+// STATE
+// ─────────────────────────────────────────────────────────────────
+let me           = null;      // Firebase Auth user
+let groups       = [];
+let selGroup     = null;
+let groupData    = null;
+let loading      = false;
+let selUser      = 'all';
+let dateFilter   = 'today';
+let customDate   = todayStr();
+
+// ─────────────────────────────────────────────────────────────────
+// HELPERS
+// ─────────────────────────────────────────────────────────────────
+function todayStr() {
+  const d = new Date();
+  return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
+}
+function pad(n) { return String(n).padStart(2,'0'); }
+function r(n)   { return Math.round((n||0)*10)/10; }
+
+function dateRange() {
+  const today = todayStr();
+  if (dateFilter === 'today')     return [today, today];
+  if (dateFilter === 'custom')    return [customDate, customDate];
+  if (dateFilter === 'yesterday') {
+    const d = new Date(); d.setDate(d.getDate()-1);
+    const s = `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
+    return [s, s];
+  }
+  if (dateFilter === 'week')  {
+    const d = new Date(); d.setDate(d.getDate()-7);
+    return [`${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`, today];
+  }
+  if (dateFilter === 'month') {
+    const d = new Date(); d.setDate(d.getDate()-30);
+    return [`${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`, today];
+  }
+  return ['2020-01-01', '2099-12-31']; // all
+}
+
+function userName(uid) {
+  const u = (groupData?.users||[]).find(u => u.id === uid);
+  return u?.name || '?';
+}
+
+function userColor(uid) {
+  const u = (groupData?.users||[]).find(u => u.id === uid);
+  return u?.color || '#6366f1';
+}
+
+// ─────────────────────────────────────────────────────────────────
+// DATA LOADING
+// ─────────────────────────────────────────────────────────────────
+async function loadGroups() {
+  const snap = await getDoc(doc(db, 'users', me.uid));
+  if (!snap.exists()) return [];
+  const ids = snap.data().groups || [];
+  const docs = await Promise.all(ids.map(id => getDoc(doc(db, 'groups', id))));
+  return docs.filter(d => d.exists()).map(d => ({id: d.id, ...d.data()}));
+}
+
+async function loadGroupData(gid) {
+  const COLS = ['foodEntries','exerciseEntries','weightEntries','waterEntries'];
+  const [gSnap, ...colSnaps] = await Promise.all([
+    getDoc(doc(db, 'groups', gid)),
+    ...COLS.map(c => getDocs(collection(db, 'groups', gid, c))),
+    getDocs(collection(db, 'groups', gid, 'profiles')),
+  ]);
+  const g = gSnap.exists() ? gSnap.data() : {};
+  const [food, ex, wt, water, profiles] = colSnaps.map(s => s.docs.map(d => ({...d.data(), id:d.id})));
+  return { ...g, users: profiles, foodEntries: food, exerciseEntries: ex, weightEntries: wt, waterEntries: water };
+}
+
+// ─────────────────────────────────────────────────────────────────
+// RENDER
+// ─────────────────────────────────────────────────────────────────
+function render() {
+  const root = document.getElementById('app');
+  if (!me)     { root.innerHTML = loginScreen(); bindLogin(); return; }
+  if (!ADMIN_EMAILS.includes(me.email)) { root.innerHTML = deniedScreen(); bindDenied(); return; }
+  root.innerHTML = portalScreen();
+  bindPortal();
+}
+
+function loginScreen() { return `
+  <div class="min-h-screen flex flex-col items-center justify-center gap-8 px-6">
+    <div class="text-center">
+      <div class="w-16 h-16 rounded-2xl bg-emerald-500 flex items-center justify-center mx-auto mb-4 text-3xl">🍎</div>
+      <h1 class="text-3xl font-black">NutriLog Admin</h1>
+      <p class="text-slate-400 mt-1">Customer Service Portal</p>
+    </div>
+    <button id="signInBtn" class="flex items-center gap-3 bg-white hover:bg-gray-100 text-gray-800 font-semibold px-8 py-3.5 rounded-xl shadow-lg transition-all active:scale-95">
+      <svg class="w-5 h-5" viewBox="0 0 24 24">
+        <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
+        <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
+        <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/>
+        <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/>
+      </svg>
+      Sign in with Google
+    </button>
+    <p class="text-xs text-slate-600">Access restricted to authorised CS staff</p>
+  </div>`; }
+
+function deniedScreen() { return `
+  <div class="min-h-screen flex items-center justify-center">
+    <div class="text-center space-y-4">
+      <div class="text-5xl">🔒</div>
+      <h2 class="text-xl font-bold">Access Denied</h2>
+      <p class="text-slate-400 text-sm">${me.email} is not authorised for this portal.</p>
+      <button id="signOutBtn" class="px-4 py-2 bg-slate-700 rounded-xl text-sm hover:bg-slate-600">Sign out</button>
+    </div>
+  </div>`; }
+
+function portalScreen() {
+  const [start, end] = dateRange();
+
+  const inRange = e =>
+    e.date >= start && e.date <= end &&
+    (selUser === 'all' || e.userId === selUser);
+
+  const food   = (groupData?.foodEntries||[]).filter(inRange).sort((a,b) => b.date.localeCompare(a.date) || (a.meal||'').localeCompare(b.meal||''));
+  const exs    = (groupData?.exerciseEntries||[]).filter(inRange).sort((a,b) => b.date.localeCompare(a.date));
+  const wts    = (groupData?.weightEntries||[]).filter(inRange).sort((a,b) => b.date.localeCompare(a.date));
+  const waters = (groupData?.waterEntries||[]).filter(inRange).sort((a,b) => b.date.localeCompare(a.date));
+
+  const sumCal  = food.reduce((s,e)=>s+(e.calories||0),0);
+  const sumProt = r(food.reduce((s,e)=>s+(e.protein||0),0));
+  const sumCarb = r(food.reduce((s,e)=>s+(e.carbs||0),0));
+  const sumFat  = r(food.reduce((s,e)=>s+(e.fat||0),0));
+
+  return `
+  <!-- Header -->
+  <header class="no-print bg-slate-800 border-b border-slate-700 px-5 py-3 flex items-center justify-between">
+    <div class="flex items-center gap-2.5">
+      <span class="text-xl">🍎</span>
+      <span class="font-black text-lg tracking-tight">NutriLog</span>
+      <span class="text-slate-500 text-sm">/ Admin Portal</span>
+    </div>
+    <div class="flex items-center gap-3">
+      <span class="text-sm text-slate-400">${me.email}</span>
+      <button id="signOutBtn" class="text-xs px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-300 transition-colors">Sign out</button>
+    </div>
+  </header>
+
+  <div class="flex" style="height:calc(100vh - 49px)">
+
+    <!-- Sidebar -->
+    <aside class="no-print w-52 flex-shrink-0 bg-slate-800 border-r border-slate-700 overflow-y-auto">
+      <div class="px-4 py-2.5 border-b border-slate-700">
+        <p class="text-[11px] font-bold text-slate-500 uppercase tracking-widest">Groups (${groups.length})</p>
+      </div>
+      ${groups.length === 0 ? `<p class="text-xs text-slate-500 px-4 py-4">No groups found. Make sure your email is added to ADMIN_EMAILS.</p>` : ''}
+      ${groups.map(g => `
+        <button class="grp-btn w-full text-left px-4 py-3 hover:bg-slate-700/50 transition-colors border-b border-slate-700/40
+          ${selGroup?.id === g.id ? 'bg-emerald-500/10 border-l-[3px] border-l-emerald-400' : ''}"
+          data-id="${g.id}">
+          <p class="text-sm font-semibold truncate leading-tight">${g.name}</p>
+          <p class="text-[11px] text-slate-500 mt-0.5">${(g.members||[]).length} members</p>
+        </button>
+      `).join('')}
+    </aside>
+
+    <!-- Main -->
+    <main class="flex-1 overflow-y-auto bg-slate-900 p-6 space-y-6">
+
+      ${!selGroup ? `
+        <div class="flex items-center justify-center h-full">
+          <div class="text-center text-slate-500 space-y-2">
+            <p class="text-5xl">👈</p>
+            <p class="text-sm">Select a group from the sidebar</p>
+          </div>
+        </div>
+      ` : loading ? `
+        <div class="flex items-center justify-center h-64 gap-3 text-slate-400">
+          <div class="w-5 h-5 border-2 border-emerald-400 border-t-transparent rounded-full animate-spin"></div>
+          Loading group data…
+        </div>
+      ` : `
+
+        <!-- Group identity (printable header) -->
+        <div class="print-header bg-slate-800 rounded-2xl p-5 flex items-start justify-between">
+          <div>
+            <h1 class="text-2xl font-black">${selGroup.name}</h1>
+            <p class="text-slate-400 text-sm mt-1">
+              ${(groupData?.users||[]).length} members &nbsp;·&nbsp;
+              Invite: <span class="font-mono text-emerald-400">${selGroup.inviteCode||'—'}</span> &nbsp;·&nbsp;
+              Created ${(selGroup.createdAt||'').slice(0,10)||'—'}
+            </p>
+          </div>
+          <div class="no-print flex gap-2">
+            <button onclick="window.print()" class="flex items-center gap-1.5 text-xs px-3 py-2 rounded-xl bg-slate-700 hover:bg-slate-600 text-slate-300 transition-colors">
+              🖨️ Print / Screenshot
+            </button>
+          </div>
+        </div>
+
+        <!-- Members grid -->
+        <section>
+          <h2 class="text-xs font-bold text-slate-500 uppercase tracking-widest mb-3">Members</h2>
+          <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
+            ${(groupData?.users||[]).map(u => {
+              const isAdmin = (selGroup.admins||[]).includes(u.id);
+              const todayFoods = (groupData?.foodEntries||[]).filter(e=>e.userId===u.id && e.date===todayStr());
+              const cal = todayFoods.reduce((s,e)=>s+(e.calories||0),0);
+              const latestWt = [...(groupData?.weightEntries||[])].filter(e=>e.userId===u.id).sort((a,b)=>b.date.localeCompare(a.date))[0];
+              return `
+                <div class="print-card bg-slate-800 rounded-xl p-3.5 border ${isAdmin?'border-emerald-500/40':'border-slate-700/50'}">
+                  <div class="flex items-center gap-2.5 mb-3">
+                    <div class="w-9 h-9 rounded-xl flex items-center justify-center text-sm font-black text-white flex-shrink-0"
+                      style="background:${u.color||'#6366f1'}">${(u.name||'?')[0].toUpperCase()}</div>
+                    <div class="min-w-0">
+                      <p class="font-bold text-sm truncate">${u.name||'?'}</p>
+                      ${isAdmin?'<span class="text-[10px] text-emerald-400 font-semibold">Admin</span>':''}
+                    </div>
+                  </div>
+                  <div class="space-y-1 text-xs">
+                    <div class="flex justify-between"><span class="text-slate-400">Today</span><span class="font-semibold text-white">${cal} kcal</span></div>
+                    <div class="flex justify-between"><span class="text-slate-400">Goal</span><span class="text-white">${u.goals?.calories||'—'} kcal</span></div>
+                    <div class="flex justify-between"><span class="text-slate-400">Weight</span><span class="text-white">${latestWt ? latestWt.weight+' lbs' : '—'}</span></div>
+                    <div class="flex justify-between"><span class="text-slate-400">Steps goal</span><span class="text-white">${(u.goals?.steps||10000).toLocaleString()}</span></div>
+                    <p class="text-slate-500 text-[10px] truncate pt-0.5">${u.googleEmail||'—'}</p>
+                  </div>
+                </div>`;
+            }).join('')}
+          </div>
+        </section>
+
+        <!-- Diary filters -->
+        <section class="no-print bg-slate-800 rounded-2xl p-4">
+          <h2 class="text-xs font-bold text-slate-500 uppercase tracking-widest mb-3">Diary Filters</h2>
+          <div class="flex flex-wrap gap-3 items-end">
+            <div>
+              <label class="text-xs text-slate-400 block mb-1">User</label>
+              <select id="selUser" class="bg-slate-700 rounded-xl px-3 py-2 text-sm text-white outline-none cursor-pointer">
+                <option value="all">All members</option>
+                ${(groupData?.users||[]).map(u=>`<option value="${u.id}" ${selUser===u.id?'selected':''}>${u.name}</option>`).join('')}
+              </select>
+            </div>
+            <div>
+              <label class="text-xs text-slate-400 block mb-1">Period</label>
+              <select id="selDate" class="bg-slate-700 rounded-xl px-3 py-2 text-sm text-white outline-none cursor-pointer">
+                <option value="today"     ${dateFilter==='today'?'selected':''}>Today</option>
+                <option value="yesterday" ${dateFilter==='yesterday'?'selected':''}>Yesterday</option>
+                <option value="week"      ${dateFilter==='week'?'selected':''}>Last 7 days</option>
+                <option value="month"     ${dateFilter==='month'?'selected':''}>Last 30 days</option>
+                <option value="all"       ${dateFilter==='all'?'selected':''}>All time</option>
+                <option value="custom"    ${dateFilter==='custom'?'selected':''}>Specific date</option>
+              </select>
+            </div>
+            ${dateFilter==='custom'?`
+              <div>
+                <label class="text-xs text-slate-400 block mb-1">Date</label>
+                <input type="date" id="customDateIn" value="${customDate}"
+                  class="bg-slate-700 rounded-xl px-3 py-2 text-sm text-white outline-none"/>
+              </div>`:``}
+            <button onclick="window.print()"
+              class="flex items-center gap-1.5 px-4 py-2 bg-emerald-600 hover:bg-emerald-500 rounded-xl text-sm font-semibold text-white transition-colors">
+              🖨️ Print / Screenshot
+            </button>
+          </div>
+        </section>
+
+        <!-- Food log -->
+        <section>
+          <div class="flex items-center justify-between mb-3">
+            <h2 class="text-xs font-bold text-slate-500 uppercase tracking-widest">Food Log — ${food.length} entries</h2>
+            ${food.length>0?`<span class="text-xs text-slate-500">${sumCal} kcal &nbsp;P:${sumProt}g &nbsp;C:${sumCarb}g &nbsp;F:${sumFat}g</span>`:''}
+          </div>
+          ${food.length===0?`<p class="text-sm text-slate-500 bg-slate-800 rounded-xl px-4 py-6 text-center">No food entries for this period</p>`:`
+          <div class="print-card bg-slate-800 rounded-2xl overflow-hidden">
+            <table class="print-table w-full text-sm border-collapse">
+              <thead>
+                <tr class="bg-slate-700/60 text-[11px] text-slate-400 uppercase tracking-wider">
+                  <th class="text-left px-4 py-2.5 font-semibold">Date</th>
+                  <th class="text-left px-4 py-2.5 font-semibold">User</th>
+                  <th class="text-left px-4 py-2.5 font-semibold">Meal</th>
+                  <th class="text-left px-4 py-2.5 font-semibold">Food</th>
+                  <th class="text-left px-4 py-2.5 font-semibold">Amount</th>
+                  <th class="text-right px-4 py-2.5 font-semibold">kcal</th>
+                  <th class="text-right px-4 py-2.5 font-semibold">Protein</th>
+                  <th class="text-right px-4 py-2.5 font-semibold">Carbs</th>
+                  <th class="text-right px-4 py-2.5 font-semibold">Fat</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${food.map((e,i)=>`
+                  <tr class="border-t border-slate-700/50 ${i%2===1?'bg-slate-700/20':''}">
+                    <td class="px-4 py-2 text-slate-400 whitespace-nowrap font-mono text-xs">${e.date}</td>
+                    <td class="px-4 py-2">
+                      <span class="inline-flex items-center gap-1.5">
+                        <span class="w-2 h-2 rounded-full flex-shrink-0" style="background:${userColor(e.userId)}"></span>
+                        <span class="font-medium text-xs">${userName(e.userId)}</span>
+                      </span>
+                    </td>
+                    <td class="px-4 py-2 text-slate-400 text-xs">${e.meal||'—'}</td>
+                    <td class="px-4 py-2 max-w-[200px] truncate">${e.foodName||'—'}</td>
+                    <td class="px-4 py-2 text-slate-400 text-xs whitespace-nowrap">${e.amount}${e.unit}</td>
+                    <td class="px-4 py-2 text-right font-bold">${e.calories||0}</td>
+                    <td class="px-4 py-2 text-right text-purple-400 text-xs">${r(e.protein)}g</td>
+                    <td class="px-4 py-2 text-right text-amber-400 text-xs">${r(e.carbs)}g</td>
+                    <td class="px-4 py-2 text-right text-pink-400 text-xs">${r(e.fat)}g</td>
+                  </tr>`).join('')}
+              </tbody>
+              <tfoot>
+                <tr class="bg-slate-700/50 border-t-2 border-slate-600 font-bold text-sm">
+                  <td colspan="5" class="px-4 py-2.5 text-slate-400 text-xs uppercase tracking-wider">Totals (${food.length} entries)</td>
+                  <td class="px-4 py-2.5 text-right">${sumCal}</td>
+                  <td class="px-4 py-2.5 text-right text-purple-400 text-xs">${sumProt}g</td>
+                  <td class="px-4 py-2.5 text-right text-amber-400 text-xs">${sumCarb}g</td>
+                  <td class="px-4 py-2.5 text-right text-pink-400 text-xs">${sumFat}g</td>
+                </tr>
+              </tfoot>
+            </table>
+          </div>`}
+        </section>
+
+        <!-- Exercise log -->
+        ${exs.length>0?`
+        <section>
+          <h2 class="text-xs font-bold text-slate-500 uppercase tracking-widest mb-3">Exercise — ${exs.length} entries</h2>
+          <div class="print-card bg-slate-800 rounded-2xl overflow-hidden">
+            <table class="print-table w-full text-sm border-collapse">
+              <thead>
+                <tr class="bg-slate-700/60 text-[11px] text-slate-400 uppercase tracking-wider">
+                  <th class="text-left px-4 py-2.5 font-semibold">Date</th>
+                  <th class="text-left px-4 py-2.5 font-semibold">User</th>
+                  <th class="text-left px-4 py-2.5 font-semibold">Activity</th>
+                  <th class="text-left px-4 py-2.5 font-semibold">Type</th>
+                  <th class="text-right px-4 py-2.5 font-semibold">Duration</th>
+                  <th class="text-right px-4 py-2.5 font-semibold">Burned</th>
+                  <th class="text-right px-4 py-2.5 font-semibold">Steps</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${exs.map((e,i)=>`
+                  <tr class="border-t border-slate-700/50 ${i%2===1?'bg-slate-700/20':''}">
+                    <td class="px-4 py-2 text-slate-400 font-mono text-xs">${e.date}</td>
+                    <td class="px-4 py-2">
+                      <span class="inline-flex items-center gap-1.5">
+                        <span class="w-2 h-2 rounded-full" style="background:${userColor(e.userId)}"></span>
+                        <span class="font-medium text-xs">${userName(e.userId)}</span>
+                      </span>
+                    </td>
+                    <td class="px-4 py-2">${e.name||'—'}</td>
+                    <td class="px-4 py-2 text-slate-400 text-xs">${e.type||'—'}</td>
+                    <td class="px-4 py-2 text-right text-slate-400 text-xs">${e.duration||0} min</td>
+                    <td class="px-4 py-2 text-right font-bold text-orange-400">${e.caloriesBurned||0}</td>
+                    <td class="px-4 py-2 text-right text-slate-400 text-xs">${e.steps?e.steps.toLocaleString():'—'}</td>
+                  </tr>`).join('')}
+              </tbody>
+            </table>
+          </div>
+        </section>`:``}
+
+        <!-- Weight -->
+        ${wts.length>0?`
+        <section>
+          <h2 class="text-xs font-bold text-slate-500 uppercase tracking-widest mb-3">Weight — ${wts.length} entries</h2>
+          <div class="print-card bg-slate-800 rounded-2xl overflow-hidden">
+            <table class="print-table w-full text-sm border-collapse">
+              <thead>
+                <tr class="bg-slate-700/60 text-[11px] text-slate-400 uppercase tracking-wider">
+                  <th class="text-left px-4 py-2.5 font-semibold">Date</th>
+                  <th class="text-left px-4 py-2.5 font-semibold">User</th>
+                  <th class="text-right px-4 py-2.5 font-semibold">Weight (lbs)</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${wts.map((e,i)=>`
+                  <tr class="border-t border-slate-700/50 ${i%2===1?'bg-slate-700/20':''}">
+                    <td class="px-4 py-2 text-slate-400 font-mono text-xs">${e.date}</td>
+                    <td class="px-4 py-2">
+                      <span class="inline-flex items-center gap-1.5">
+                        <span class="w-2 h-2 rounded-full" style="background:${userColor(e.userId)}"></span>
+                        <span class="font-medium text-xs">${userName(e.userId)}</span>
+                      </span>
+                    </td>
+                    <td class="px-4 py-2 text-right font-bold text-purple-400">${e.weight} lbs</td>
+                  </tr>`).join('')}
+              </tbody>
+            </table>
+          </div>
+        </section>`:``}
+
+        <!-- Water -->
+        ${waters.length>0?`
+        <section>
+          <h2 class="text-xs font-bold text-slate-500 uppercase tracking-widest mb-3">Water — ${waters.length} entries</h2>
+          <div class="print-card bg-slate-800 rounded-2xl overflow-hidden">
+            <table class="print-table w-full text-sm border-collapse">
+              <thead>
+                <tr class="bg-slate-700/60 text-[11px] text-slate-400 uppercase tracking-wider">
+                  <th class="text-left px-4 py-2.5 font-semibold">Date</th>
+                  <th class="text-left px-4 py-2.5 font-semibold">User</th>
+                  <th class="text-right px-4 py-2.5 font-semibold">Amount (oz)</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${waters.map((e,i)=>`
+                  <tr class="border-t border-slate-700/50 ${i%2===1?'bg-slate-700/20':''}">
+                    <td class="px-4 py-2 text-slate-400 font-mono text-xs">${e.date}</td>
+                    <td class="px-4 py-2">
+                      <span class="inline-flex items-center gap-1.5">
+                        <span class="w-2 h-2 rounded-full" style="background:${userColor(e.userId)}"></span>
+                        <span class="font-medium text-xs">${userName(e.userId)}</span>
+                      </span>
+                    </td>
+                    <td class="px-4 py-2 text-right font-bold text-blue-400">${e.amount} oz</td>
+                  </tr>`).join('')}
+              </tbody>
+            </table>
+          </div>
+        </section>`:``}
+
+      `}
+    </main>
+  </div>`;
+}
+
+// ─────────────────────────────────────────────────────────────────
+// EVENT BINDING
+// ─────────────────────────────────────────────────────────────────
+function bindLogin() {
+  document.getElementById('signInBtn')?.addEventListener('click', () => signInWithPopup(auth, provider).catch(console.error));
+}
+function bindDenied() {
+  document.getElementById('signOutBtn')?.addEventListener('click', () => signOut(auth));
+}
+function bindPortal() {
+  document.getElementById('signOutBtn')?.addEventListener('click', () => signOut(auth));
+
+  document.querySelectorAll('.grp-btn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const id = btn.dataset.id;
+      if (selGroup?.id === id) return;
+      selGroup  = groups.find(g => g.id === id);
+      groupData = null;
+      selUser   = 'all';
+      dateFilter = 'today';
+      loading   = true;
+      render();
+      groupData = await loadGroupData(id);
+      loading   = false;
+      render();
+    });
+  });
+
+  document.getElementById('selUser')?.addEventListener('change', e => { selUser = e.target.value; render(); });
+  document.getElementById('selDate')?.addEventListener('change', e => { dateFilter = e.target.value; render(); });
+  document.getElementById('customDateIn')?.addEventListener('change', e => { customDate = e.target.value; render(); });
+}
+
+// ─────────────────────────────────────────────────────────────────
+// AUTH LISTENER
+// ─────────────────────────────────────────────────────────────────
+onAuthStateChanged(auth, async user => {
+  me = user;
+  if (user && ADMIN_EMAILS.includes(user.email)) {
+    groups = await loadGroups();
+  } else {
+    groups = [];
+  }
+  render();
+});
+</script>
+</body>
+</html>
