@@ -3,6 +3,9 @@
   publish = "dist"
   functions = "netlify/functions"
 
+[build.environment]
+  NODE_VERSION = "18"
+
 # Route /api/ai in the app to the serverless function
 [[redirects]]
   from = "/api/ai"

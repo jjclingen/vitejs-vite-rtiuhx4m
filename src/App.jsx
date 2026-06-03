@@ -2401,7 +2401,6 @@ ${projectedWeight ? `Projected weight in 4 weeks: ${projectedWeight} lbs` : "Can
     setError("");
 
     try {
-      const prompt = buildPrompt();
       const res = await fetch(AI_ENDPOINT, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
